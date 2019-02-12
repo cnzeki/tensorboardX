@@ -1,22 +1,16 @@
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
-from __future__ import unicode_literals
-
-import copy
-import logging
 import os
 import re
 import six
 
 from builtins import bytes
-from caffe2.proto import caffe2_pb2
-from caffe2.python import core, workspace
-
-from .proto.graph_pb2 import GraphDef
 from .proto.node_def_pb2 import NodeDef
+from .proto.graph_pb2 import GraphDef
+from .proto.attr_value_pb2 import AttrValue
+from .proto.versions_pb2 import VersionDef
 from .proto.tensor_shape_pb2 import TensorShapeProto
-
 
 def _make_unique_name(seen, name, min_version=0):
     '''
@@ -95,44 +89,7 @@ def _convert_to_ssa(shapes, blob_name_tracker, ops):
     Returns:
         None. Modifies blob_name_tracker and ops in-place.
     '''
-    ir = core.IR(ops)
-    seen = set()
-    versioned = {}
-    new_shapes = {}
-    new_blob_name_tracker = {}
-
-    def ssa_name(name, versions):
-        assert name in versions
-        version = versions[name]
-        if (name, version) in versioned:
-            return versioned[(name, version)]
-        # Always setting name2 = `{name}_{version}` would work, but we also try
-        # to avoid a trailing `_0`, so we have to be careful not to introduce
-        # name collisions, such as (foo_1, 0) = foo_1 = (foo, 1).
-        # Note: operator names (if any) will be handled later.
-        new_name = _make_unique_name(seen, name, min_version=version)
-        versioned[(name, version)] = new_name
-        # Transfer shape.
-        if name in shapes:
-            new_shapes[new_name] = shapes[name]
-        if blob_name_tracker and name in blob_name_tracker:
-            new_blob_name_tracker[new_name] = blob_name_tracker[name]
-        return new_name
-
-    for (op, ssa) in zip(ops, ir.ssa):
-        assert op is ssa.op
-        inputs = list(op.input)
-        outputs = list(op.output)
-        del op.input[:]
-        del op.output[:]
-        op.input.extend(ssa_name(name, ssa.in_versions) for name in inputs)
-        op.output.extend(ssa_name(name, ssa.out_versions) for name in outputs)
-
-    shapes.clear()
-    shapes.update(new_shapes)
-    if blob_name_tracker:
-        blob_name_tracker.clear()
-        blob_name_tracker.update(new_blob_name_tracker)
+    pass
 
 
 def _get_blob_names(ops):
@@ -311,13 +268,7 @@ def _tf_device(device_option):
         Formatted string representing device information contained in
             device_option.
     '''
-    if not device_option.HasField("device_type"):
-        return ""
-    if device_option.device_type == caffe2_pb2.CPU or device_option.device_type == caffe2_pb2.MKLDNN:
-        return "/cpu:*"
-    if device_option.device_type == caffe2_pb2.CUDA:
-        return "/gpu:{}".format(device_option.device_id)
-    raise Exception("Unhandled device", device_option)
+    return "/cpu:*"
 
 
 def _add_tf_shape(attr_dict, ints):
@@ -629,7 +580,7 @@ def _operators_to_graph_def(
     shapes,
     ops,
     colon_replacement='$',
-    with_ssa=True,
+    with_ssa=False,
     with_gradient_scope=True,
     blob_name_tracker=None,
     show_simplified=False,
@@ -714,129 +665,49 @@ def _operators_to_graph_def(
     return current_graph
 
 
-def _propagate_device_option(net_def):
-    '''
-    Propagate the device options from net to operators.
-
-    Args:
-        net_def: A caffe2_pb2.NetDef representing a computation graph. The graph
-            consists of Caffe2 operators.
-
-    Returns:
-        None. Iterates through all ops contained within the net. For each op,
-            modifies the op device_option in-place to be the net device_option
-            if the op has no pre-existing device_option, and leaves the op as-is
-            if it already has a device_option.
-    '''
-    if not net_def.HasField("device_option"):
-        return
-    for op in net_def.op:
-        if not op.HasField("device_option"):
-            op.device_option.CopyFrom(net_def.device_option)
-
-
-def _try_get_shapes(nets):
-    '''
-    Get missing shapes for all blobs contained in the nets.
-
-    Args:
-        nets: List of core.Net to extract blob shape information from.
-
-    Returns:
-        Dictionary containing blob name to shape/dimensions mapping. The net
-            is a computation graph that is composed of operators, and the
-            operators have input and output blobs, each with their own dims.
-    '''
-    try:
-        # Note: this will inspect the workspace for better or worse.
-        # We don't care about the types, only the shapes
-        shapes, _ = workspace.InferShapesAndTypes(nets)
-        return shapes
-    except Exception as e:
-        logging.warning('Failed to compute shapes: %s', e)
-        return {}
-
-
-def model_to_graph_def(model, **kwargs):
-    '''
-    Convert a Caffe2 model to a Tensorflow graph. This function extracts
-    'param_init_net' and 'net' from the model and passes it to nets_to_graph()
-    for further processing.
-
-    Args:
-        model (cnn.CNNModelHelper, model_helper.ModelHelper): The model to
-            extract the nets (instances of core.Net) from.
-
-    Returns:
-        Call to nets_to_graph_def() with extracted 'param_init_net', 'net' and
-            **kwargs. See _operators_to_graph_def for detailed **kwargs.
-    '''
-    nets = [model.param_init_net, model.net]
-    return nets_to_graph_def(nets, **kwargs)
-
-
-def nets_to_graph_def(nets, shapes=None, **kwargs):
-    '''
-    Convert a set of Caffe2 nets to a Tensorflow graph.
-
-    Args:
-        nets: List of core.Nets. core.Net is a wrapper around a NetDef protobuf.
-            The corresponding protobuf can be extracted using .Proto().
-        shapes: Dictionary mapping blob names to their shapes/dimensions.
-
-    Returns:
-        Call to protos_to_graph_def() with the extracted NetDef protobufs and
-            **kwargs. See _operators_to_graph_def for detailed **kwargs.
-    '''
-    # if shapes is None:
-    #     shapes = _try_get_shapes(nets)
-    # _try_get_shapes(nets) depends on workspace.InferShapesAndTypes(nets),
-    # which is currently broken (segfault). We omit the shapes for now.
+def make_graph_caffe(prototxt, **kwargs):
+    import caffe
+    from caffe.proto import caffe_pb2
+    from google.protobuf import text_format
+    # phase
+    phase = caffe.TRAIN
+    if 'phase' in kwargs:
+        phase = kwargs['phase']
+    # parse proto
+    net = caffe_pb2.NetParameter()
+    file = open(prototxt, 'rb')
+    txt = file.read()
+    file.close()
+    text_format.Merge(txt, net)
+    # load into Net
+    caffe_net = caffe.Net(prototxt, caffe.TRAIN)
+    blobs = caffe_net.blobs
     shapes = {}
-    nets = [copy.deepcopy(net.Proto()) for net in nets]
-    shapes = copy.deepcopy(shapes)
-    return protos_to_graph_def(nets, shapes, **kwargs)
+    for name, blob in blobs.iteritems():
+        shape = [d for d in blob.shape]
+        shapes[name] = shape
 
+    # convert to GraphDef
+    ops = []
+    for layer in net.layer:
+        if phase is not None:
+            included = False
+        if len(layer.include) == 0:
+            included = True
+        if len(layer.include) > 0 and len(layer.exclude) > 0:
+            raise ValueError('layer ' + layer.name + ' has both include '
+                                                     'and exclude specified.')
+        for layer_phase in layer.include:
+            included = included or layer_phase.phase == phase
+        for layer_phase in layer.exclude:
+            included = included and not layer_phase.phase == phase
+        if not included:
+            continue
 
-def protos_to_graph_def(net_defs, shapes=None, **kwargs):
-    '''
-    Convert a set of Caffe2 net definitions to a Tensorflow graph.
+        op = {'type': layer.type, 'name': layer.name}
+        op['input'] = layer.bottom
+        op['output'] = layer.top
+        ops.append(op)
 
-    Args:
-        net_defs: List of caffe2_pb2.NetDef protobufs representing computation
-            graphs.
-        shapes: Dictionary mapping blob names to their shapes/dimensions.
-
-    Returns:
-        Call to _operators_to_graph_def() with the extracted operators from the
-            NetDefs and **kwargs. See _operators_to_graph_def for detailed
-            **kwargs.
-    '''
-    for net in net_defs:
-        _propagate_device_option(net)
-    shapes = copy.deepcopy(shapes or {})
-    ops = [op for net_def in net_defs for op in net_def.op]
-    return _operators_to_graph_def(shapes, ops, **kwargs)
-
-
-def make_graph_caffe2(model, **kwargs):
-    from caffe2.proto import caffe2_pb2
-    from caffe2.python import core
-    from .caffe2_graph import (
-        model_to_graph_def, nets_to_graph_def, protos_to_graph_def
-    )
-    # notimporterror should be already handled when checking self.caffe2_enabled
-
-    '''Write graph to the summary. Check model type and handle accordingly.'''
-    if isinstance(model, list):
-        if isinstance(model[0], core.Net):
-            current_graph = nets_to_graph_def(
-                model, **kwargs)
-        elif isinstance(model[0], caffe2_pb2.NetDef):
-            current_graph = protos_to_graph_def(
-                model, **kwargs)
-    # Handles cnn.CNNModelHelper, model_helper.ModelHelper
-    else:
-        current_graph = model_to_graph_def(
-            model, **kwargs)
-    return current_graph
+    # Now, add the nodes to the graph.
+    return _operators_to_graph_def(shapes, ops)

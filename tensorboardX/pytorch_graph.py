@@ -212,3 +212,18 @@ def graph(model, args, verbose=False, omit_useless_nodes=True):
     stepstats = RunMetadata(step_stats=StepStats(dev_stats=[DeviceStepStats(device="/device:CPU:0",
                                                                             node_stats=node_stats)]))
     return GraphDef(node=list_of_nodes, versions=VersionDef(producer=22)), stepstats
+
+def make_graph_pytorch(model, args, verbose=False, omit_useless_nodes=True):
+    # A valid PyTorch model should have a 'forward' method
+    import torch
+    from distutils.version import LooseVersion
+    if LooseVersion(torch.__version__) >= LooseVersion("0.3.1"):
+        pass
+    else:
+        if LooseVersion(torch.__version__) >= LooseVersion("0.3.0"):
+            print('You are using PyTorch==0.3.0, use add_onnx_graph()')
+            return None
+        if not hasattr(torch.autograd.Variable, 'grad_fn'):
+            print('add_graph() only supports PyTorch v0.2.')
+            return None
+    return graph(model, args, verbose, omit_useless_nodes)

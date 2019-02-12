@@ -119,3 +119,13 @@ def convert_to_HWC(tensor, input_format):  # tensor: numpy array
         tensor = tensor.transpose(index)
         tensor = np.stack([tensor, tensor, tensor], 2)
         return tensor
+
+
+def recognize_framework(x):
+    type_str = str(type(x))
+    feat_strs = ['torch', 'mxnet', 'chainer', '.prototxt', 'caffe2.']
+    for feat in feat_strs:
+        if feat in type_str:
+            return feat.replace('.', '')
+    raise NotImplementedError(
+        'Unrecognized type {}'.format(type_str))
